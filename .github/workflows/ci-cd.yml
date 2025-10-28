@@ -1,0 +1,341 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    tags:
+      - 'v*.*.*'
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: '1.21'
+  AWS_REGION: 'us-east-1'
+  ECR_REPOSITORY: 'product-comparison-api'
+  ECS_SERVICE: 'product-api-service'
+  ECS_CLUSTER: 'product-api-cluster'
+  CONTAINER_NAME: 'product-api'
+
+jobs:
+  # Security Scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          
+      - name: Run gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-fmt sarif -out gosec-results.sarif ./...'
+          
+      - name: Upload gosec results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'gosec-results.sarif'
+
+  # Code Quality and Testing
+  test:
+    name: Test & Code Quality
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+          
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          
+      - name: Install dependencies
+        run: |
+          go mod download
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          go install gotest.tools/gotestsum@latest
+          go install github.com/axw/gocov/gocov@latest
+          go install github.com/AlekSi/gocov-xml@latest
+          
+      - name: Run linters
+        run: |
+          golangci-lint run --timeout=5m --config=.golangci.yml
+          
+      - name: Run unit tests
+        run: |
+          gotestsum --format testname --junitfile junit.xml -- \
+            -race -coverprofile=coverage.out -covermode=atomic ./...
+          
+      - name: Generate coverage report
+        run: |
+          gocov convert coverage.out | gocov-xml > coverage.xml
+          go tool cover -html=coverage.out -o coverage.html
+          
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: |
+            junit.xml
+            coverage.xml
+            coverage.html
+            
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          
+      - name: Run integration tests
+        env:
+          REDIS_HOST: localhost
+          REDIS_PORT: 6379
+        run: |
+          go test -tags=integration -v ./test/integration/...
+          
+      - name: Run benchmark tests
+        run: |
+          go test -bench=. -benchmem -benchtime=10s ./... | tee benchmark.txt
+          
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark-results
+          path: benchmark.txt
+
+  # Build and Push Docker Image
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            
+      - name: Run Trivy on container image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.tags }}
+          format: 'sarif'
+          output: 'container-scan-results.sarif'
+          
+      - name: Upload container scan results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'container-scan-results.sarif'
+
+  # Deploy to ECS
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://api.product-comparison.example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query taskDefinition > task-definition.json
+            
+      - name: Fill in the new image ID in the task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build.outputs.image-tag }}
+          
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          
+      - name: Verify deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+            
+      - name: Run smoke tests
+        run: |
+          SERVICE_URL=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].loadBalancers[0].targetGroupArn' \
+            --output text | xargs -I {} aws elbv2 describe-target-health \
+            --target-group-arn {} \
+            --query 'TargetHealthDescriptions[0].Target.Id' \
+            --output text)
+          
+          # Wait for service to be healthy
+          sleep 30
+          
+          # Run basic health check
+          curl -f https://${SERVICE_URL}/health || exit 1
+          
+          # Run API tests
+          npm install -g newman
+          newman run postman/product-api.postman_collection.json \
+            --environment postman/production.postman_environment.json
+
+  # Performance Testing
+  performance-test:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Run K6 Performance Tests
+        uses: grafana/k6-action@v0.3.0
+        with:
+          filename: test/performance/load-test.js
+          flags: --out influxdb=http://localhost:8086/k6
+          
+      - name: Upload performance results
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-results
+          path: performance-results.json
+
+  # Rollback on Failure
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: failure()
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+          
+      - name: Rollback to previous version
+        run: |
+          # Get the previous task definition revision
+          PREVIOUS_REVISION=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_SERVICE }} \
+            --query 'taskDefinition.revision' \
+            --output text | awk '{print $1-1}')
+          
+          # Update service with previous revision
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ env.ECS_SERVICE }}:${PREVIOUS_REVISION}
+            
+      - name: Send rollback notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "⚠️ Deployment rolled back",
+              attachments: [{
+                color: 'warning',
+                text: 'Deployment to production was rolled back due to failures'
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
