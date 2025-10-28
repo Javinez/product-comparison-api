@@ -258,7 +258,7 @@ LOG_FORMAT=json
 
 - [Diagramas C4](docs/architecture/) - Arquitectura del sistema
 - [ADRs](docs/adr/) - Decisiones arquitectónicas
-- [API Spec](docs/api/openapi.yaml) - Especificación OpenAPI
+- [API Spec](docs/api/openapi-spec.yaml) - Especificación OpenAPI
 - [Guía de Escalamiento](docs/scaling-guide.md) - Escalar a millones
 - [Runbooks](docs/runbooks/) - Procedimientos operativos
 
@@ -276,9 +276,9 @@ Este proyecto está licenciado bajo la Licencia MIT - ver el archivo [LICENSE](L
 
 ## 👥 Equipo
 
-- **Arquitecto Principal**: [Tu Nombre]
-- **DevOps Lead**: [Tu Nombre]
-- **Backend Developer**: [Tu Nombre]
+- **Arquitecto Principal**
+- **DevOps Lead**
+- **Backend Developer**
 
 ## 📞 Soporte
 
