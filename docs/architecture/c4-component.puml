@@ -1,0 +1,36 @@
+@startuml C4_Component_Diagram
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Product Comparison API - Component Diagram (Clean Architecture)
+
+Container_Boundary(api, "Product API") {
+    Component(handler, "HTTP Handler", "Gorilla Mux", "Handles HTTP requests and responses")
+    Component(middleware, "Middleware", "Go", "CORS, Rate Limiting, Auth, Logging")
+    Component(interactor, "Product Interactor", "Go", "Business logic and use cases")
+    Component(repoInterface, "Repository Interface", "Go Interface", "Abstraction for data persistence")
+    Component(jsonRepo, "JSON Repository", "Go", "Implementation for JSON storage")
+    Component(postgresRepo, "PostgreSQL Repository", "Go", "Future: SQL implementation")
+    Component(cacheInterface, "Cache Interface", "Go Interface", "Abstraction for caching")
+    Component(redisCache, "Redis Cache", "Go", "Redis cache implementation")
+    Component(domain, "Domain Entities", "Go", "Product, Comparison models")
+    Component(config, "Configuration", "Go", "Application configuration")
+}
+
+Rel(handler, middleware, "Uses")
+Rel(middleware, interactor, "Calls")
+Rel(interactor, repoInterface, "Depends on")
+Rel(interactor, cacheInterface, "Depends on")
+Rel(interactor, domain, "Uses")
+Rel(jsonRepo, repoInterface, "Implements")
+Rel(postgresRepo, repoInterface, "Implements")
+Rel(redisCache, cacheInterface, "Implements")
+Rel(jsonRepo, domain, "Uses")
+Rel(handler, config, "Loads")
+
+' Clean Architecture layers
+note right of interactor : Use Cases Layer\n(Application Business Rules)
+note right of domain : Entities Layer\n(Enterprise Business Rules)
+note right of handler : Interface Adapters Layer\n(Controllers, Presenters)
+note right of jsonRepo : Frameworks & Drivers Layer\n(External Interfaces)
+
+@enduml

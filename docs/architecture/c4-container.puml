@@ -1,0 +1,29 @@
+@startuml C4_Container_Diagram
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Product Comparison API - Container Diagram
+
+Person(user, "End User", "User who wants to compare products")
+
+System_Boundary(pcs, "Product Comparison System") {
+    Container(api, "Product API", "Go, Gorilla Mux", "RESTful API providing product comparison")
+    Container(cache, "Cache Layer", "Redis", "Caches frequently accessed data")
+    ContainerDb(jsonDb, "JSON Storage", "File System", "Stores product data in JSON files")
+    ContainerDb(postgres, "PostgreSQL", "Database", "Future: Relational database for products")
+}
+
+System_Ext(alb, "Application Load Balancer", "AWS ALB")
+System_Ext(ecs, "Container Orchestration", "AWS ECS Fargate")
+System_Ext(cloudwatch, "Monitoring", "AWS CloudWatch")
+System_Ext(s3, "Object Storage", "AWS S3", "Backup and static files")
+
+Rel(user, alb, "Makes requests", "HTTPS")
+Rel(alb, api, "Routes requests", "HTTP")
+Rel(api, cache, "Reads/Writes", "Redis Protocol")
+Rel(api, jsonDb, "Reads/Writes", "File I/O")
+Rel(api, postgres, "Future: Reads/Writes", "SQL")
+Rel(api, cloudwatch, "Sends logs/metrics", "AWS SDK")
+Rel(jsonDb, s3, "Backups", "AWS SDK")
+Rel(api, ecs, "Deployed on", "Container")
+
+@enduml
