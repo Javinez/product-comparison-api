@@ -1,0 +1,736 @@
+openapi: 3.0.3
+info:
+  title: Product Comparison API
+  description: |
+    High-performance REST API for product comparison built with Go following Clean Architecture principles.
+    
+    ## Features
+    - Compare multiple products (up to 10 simultaneous)
+    - Search and filter by category
+    - Multi-level caching (In-memory + Redis)
+    - Rate limiting and throttling
+    - Comprehensive error handling
+    
+    ## Architecture
+    The API implements Clean Architecture with:
+    - Domain Layer: Business entities
+    - Use Cases Layer: Business logic
+    - Interface Adapters: HTTP handlers and repositories
+    - Frameworks & Drivers: Concrete implementations
+  version: 1.0.0
+  contact:
+    name: API Support
+    email: support@product-api.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.product-comparison.example.com
+    description: Production server
+  - url: https://staging-api.product-comparison.example.com
+    description: Staging server
+
+tags:
+  - name: Products
+    description: Product management operations
+  - name: Comparison
+    description: Product comparison operations
+  - name: Search
+    description: Product search operations
+  - name: Health
+    description: Service health and monitoring
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check endpoint
+      description: Returns the health status of the service
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  service:
+                    type: string
+                    example: product-comparison-api
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: '2024-10-27T10:30:00Z'
+                  version:
+                    type: string
+                    example: 1.0.0
+              examples:
+                healthy:
+                  value:
+                    status: healthy
+                    service: product-comparison-api
+                    timestamp: '2024-10-27T10:30:00Z'
+                    version: 1.0.0
+
+  /api/v1/products:
+    get:
+      tags:
+        - Products
+      summary: List all products
+      description: Retrieves a paginated list of all products
+      operationId: listProducts
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of products to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: offset
+          in: query
+          description: Number of products to skip
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: sort
+          in: query
+          description: Sort field and order
+          required: false
+          schema:
+            type: string
+            enum: [price_asc, price_desc, rating_asc, rating_desc, name_asc, name_desc]
+            default: name_asc
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    post:
+      tags:
+        - Products
+      summary: Create a new product
+      description: Creates a new product in the catalog
+      operationId: createProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '201':
+          description: Product created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/products/{id}:
+    get:
+      tags:
+        - Products
+      summary: Get product by ID
+      description: Retrieves detailed information about a specific product
+      operationId: getProduct
+      parameters:
+        - name: id
+          in: path
+          description: Product ID
+          required: true
+          schema:
+            type: string
+            pattern: '^prod-[0-9]{3,}$'
+            example: prod-001
+      responses:
+        '200':
+          description: Product found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    put:
+      tags:
+        - Products
+      summary: Update a product
+      description: Updates an existing product
+      operationId: updateProduct
+      parameters:
+        - name: id
+          in: path
+          description: Product ID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+      responses:
+        '200':
+          description: Product updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    
+    delete:
+      tags:
+        - Products
+      summary: Delete a product
+      description: Removes a product from the catalog
+      operationId: deleteProduct
+      parameters:
+        - name: id
+          in: path
+          description: Product ID
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Product deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/products/compare:
+    get:
+      tags:
+        - Comparison
+      summary: Compare multiple products
+      description: |
+        Compares multiple products and returns detailed comparison data.
+        
+        **Limits:**
+        - Minimum: 2 products
+        - Maximum: 10 products
+        
+        **Features:**
+        - Price range analysis
+        - Rating comparison
+        - Specification differences
+        - Brand and category grouping
+      operationId: compareProducts
+      parameters:
+        - name: ids
+          in: query
+          description: Comma-separated list of product IDs to compare
+          required: true
+          schema:
+            type: string
+            pattern: '^(prod-[0-9]{3,})(,prod-[0-9]{3,}){1,9}$'
+            example: prod-001,prod-002,prod-003
+        - name: include
+          in: query
+          description: Additional fields to include in comparison
+          required: false
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [specifications, reviews, availability, price_history]
+          style: form
+          explode: false
+      responses:
+        '200':
+          description: Comparison successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComparisonResponse'
+              examples:
+                twoProducts:
+                  summary: Comparing two laptops
+                  value:
+                    success: true
+                    data:
+                      comparison_id: comp-abc123
+                      products:
+                        - id: prod-001
+                          name: MacBook Pro 14
+                          price: 1999.99
+                          rating: 4.8
+                        - id: prod-002
+                          name: Dell XPS 13
+                          price: 1499.99
+                          rating: 4.5
+                      differences:
+                        brands: [Apple, Dell]
+                        price_range:
+                          min: 1499.99
+                          max: 1999.99
+                      similarities:
+                        category: Laptops
+                        avg_rating: 4.65
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: One or more products not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Too many products to compare (max 10)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/products/search:
+    get:
+      tags:
+        - Search
+      summary: Search products
+      description: Search products by name, description, or specifications
+      operationId: searchProducts
+      parameters:
+        - name: q
+          in: query
+          description: Search query (minimum 2 characters)
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 100
+            example: laptop
+        - name: category
+          in: query
+          description: Filter by category
+          required: false
+          schema:
+            type: string
+        - name: min_price
+          in: query
+          description: Minimum price filter
+          required: false
+          schema:
+            type: number
+            minimum: 0
+        - name: max_price
+          in: query
+          description: Maximum price filter
+          required: false
+          schema:
+            type: number
+            minimum: 0
+        - name: min_rating
+          in: query
+          description: Minimum rating filter
+          required: false
+          schema:
+            type: number
+            minimum: 0
+            maximum: 5
+        - name: limit
+          in: query
+          description: Maximum number of results
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/v1/products/category/{category}:
+    get:
+      tags:
+        - Products
+      summary: Get products by category
+      description: Retrieves all products in a specific category
+      operationId: getProductsByCategory
+      parameters:
+        - name: category
+          in: path
+          description: Product category
+          required: true
+          schema:
+            type: string
+            example: Laptops
+        - name: sort
+          in: query
+          description: Sort order
+          required: false
+          schema:
+            type: string
+            enum: [rating_desc, price_asc, price_desc]
+            default: rating_desc
+      responses:
+        '200':
+          description: Products found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  schemas:
+    Product:
+      type: object
+      required:
+        - id
+        - name
+        - price
+        - rating
+      properties:
+        id:
+          type: string
+          pattern: '^prod-[0-9]{3,}$'
+          example: prod-001
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: MacBook Pro 14
+        image_url:
+          type: string
+          format: uri
+          example: https://example.com/macbook.jpg
+        description:
+          type: string
+          maxLength: 1000
+          example: Apple MacBook Pro with M3 chip
+        price:
+          type: number
+          format: double
+          minimum: 0
+          example: 1999.99
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          default: USD
+          example: USD
+        rating:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 5
+          example: 4.8
+        specifications:
+          type: object
+          additionalProperties: true
+          example:
+            processor: Apple M3 Pro
+            ram: 18GB
+            storage: 512GB SSD
+            display: 14.2-inch Liquid Retina XDR
+        category:
+          type: string
+          example: Laptops
+        brand:
+          type: string
+          example: Apple
+        stock:
+          type: integer
+          minimum: 0
+          example: 50
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ProductInput:
+      type: object
+      required:
+        - name
+        - price
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        image_url:
+          type: string
+          format: uri
+        description:
+          type: string
+          maxLength: 1000
+        price:
+          type: number
+          format: double
+          minimum: 0
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          default: USD
+        rating:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 5
+        specifications:
+          type: object
+          additionalProperties: true
+        category:
+          type: string
+        brand:
+          type: string
+        stock:
+          type: integer
+          minimum: 0
+
+    ProductComparison:
+      type: object
+      properties:
+        comparison_id:
+          type: string
+          example: comp-abc123
+        products:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        created_at:
+          type: string
+          format: date-time
+        differences:
+          type: object
+          properties:
+            brands:
+              type: array
+              items:
+                type: string
+            categories:
+              type: array
+              items:
+                type: string
+            specifications:
+              type: array
+              items:
+                type: string
+        similarities:
+          type: object
+          properties:
+            category:
+              type: string
+            avg_rating:
+              type: number
+            price_range:
+              type: object
+              properties:
+                min:
+                  type: number
+                max:
+                  type: number
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Bad Request
+        message:
+          type: string
+          example: Invalid product ID format
+        timestamp:
+          type: string
+          format: date-time
+        path:
+          type: string
+          example: /api/v1/products/invalid-id
+
+    ProductResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Product'
+
+    ProductListResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessResponse'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                products:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Product'
+                meta:
+                  type: object
+                  properties:
+                    total:
+                      type: integer
+                    limit:
+                      type: integer
+                    offset:
+                      type: integer
+                    has_more:
+                      type: boolean
+
+    ComparisonResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessResponse'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ProductComparison'
+
+    SearchResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Product'
+
+  responses:
+    BadRequest:
+      description: Bad Request - Invalid input parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            invalidId:
+              value:
+                error: Bad Request
+                message: Invalid product ID format
+                timestamp: '2024-10-27T10:30:00Z'
+                path: /api/v1/products/invalid
+            
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            productNotFound:
+              value:
+                error: Not Found
+                message: Product not found
+                timestamp: '2024-10-27T10:30:00Z'
+                path: /api/v1/products/prod-999
+    
+    Conflict:
+      description: Conflict - Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    TooManyRequests:
+      description: Too many requests - Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Request limit per hour
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Remaining requests
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp when the rate limit resets
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication (future implementation)
+    
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication (future implementation)
+
+security: []  # No security by default, can be overridden per endpoint
